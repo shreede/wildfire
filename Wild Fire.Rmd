@@ -1,0 +1,715 @@
+---
+title: "Wild Fire Analysis"
+output: html_document
+---
+# Introduction
+This database is a spectacular collection of data on wildfires in the United States from 1992 to 2015 created to support the US Fire Program Analysis. It has data on nearly 2 million wildfires over this time period.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,include=FALSE}
+## https://www.kaggle.com/captcalculator/wildfire-exploratory-analysis/notebook
+```
+
+
+* [Load Data](#Load)
+* [Wildfires over Time](#Time)
+* [Fires by Size](#Size)
+* [Wildfire Causes](#cause)
+* [Wildfires by Geography](#Geo)
+* [Target Feature analysys](#Feature)
+To get started, load the libraries that we will need. We’ll want RSQLite and dbplyr to extract the data from the sqlite database. We want dplyr for manipulation and ggplot2 for plotting of course.
+
+```{r, message=FALSE}
+library(RSQLite)
+library(dbplyr)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(xts)
+library(ggfortify)
+library(ggthemes)
+library(maps)
+library(mapdata)
+library(leaflet)
+
+```
+
+
+## Load the Data {#Load}
+Let’s get the data from the database. Because it will fit into RAM, we’ll want to extract the data into a dataframe rather than running sql queries againt the database on disk because it will be faster.
+
+
+```{r}
+# Create a db connection
+connect <- dbConnect(SQLite(), '~/Datascience/dataFiles/FPA_FOD_20170508.sqlite')
+
+# pull the fires table into RAM
+
+fires <- tbl(connect,"fires") %>% collect()
+
+# check the size of the table
+print(object.size(fires),units = "Gb")
+
+
+
+```
+
+
+```{r}
+# Disconnect from Db
+
+dbDisconnect(connect)
+```
+
+Get a quick view of the data
+
+```{r}
+glimpse(fires)
+```
+
+This database is pretty extensive. There is a lot of good stuff in here - spatial and temporal data. Let’s see if we can find out anything interesting about wildfires in the US.
+
+
+## Wild fire over time {#Time}
+
+### {.tabset}
+
+#### Annual
+```{r}
+# fire ove the years
+
+fires %>%
+  group_by(FIRE_YEAR) %>%
+  summarise(n_fires = n()) %>%
+  ggplot(aes(x= FIRE_YEAR,y = n_fires/1000)) +
+  geom_bar(stat = 'identity', fill = 'orange')+
+  geom_smooth(method = 'lm', se = FALSE, linetype = 'dashed', size = 0.4, color = 'red') + 
+  labs(x = '', y = 'Number of wildfires (thousands)', title = 'US Wildfires by Year')
+  
+```
+
+The number of fires per year ran between 60,000 and 100,000 from 1992 to 2015. There was a spike in fires in 2006 to about 114,000. There is a small upward trend during this time period. 
+
+#### Day of the year
+
+```{r}
+fires %>%
+  group_by(DISCOVERY_DOY) %>%
+  summarise(n_day = n()) %>%
+  ggplot(aes(x=DISCOVERY_DOY,y=n_day))+
+  geom_bar(stat = 'identity',fill = "orange")+
+  geom_smooth(method = "lm",se = FALSE, linetype = 'dashed', size = 0.4, color = 'red') + 
+  labs(x = '', y = 'Number of wildfires', title = 'US Wildfires by Day of the Year')
+```
+
+The date columns in the database are in julian days. These two lines create new columns in year-month-day format. 
+
+#### Daily
+
+```{r}
+library(date)
+fires$CONT_DATEymd <- as.Date(fires$CONT_DATE - 2458014.5, origin = '2017-09-18')
+fires$DISCOVERY_DATEymd <- as.Date(fires$DISCOVERY_DATE - 2458014.5, origin = '2017-09-18')
+
+head(fires$CONT_DATEymd)
+
+```
+
+
+Now that we've done that we can create time series of fires over time. Here is a plot of daily fires. You can see the clear seasonal pattern with the number of fires peaking in the summer of each year. 
+
+
+```{r}
+fires %>%
+  group_by(DISCOVERY_DATEymd) %>%
+  summarise(n_fires = n()) %>%
+  ggplot(aes(x = DISCOVERY_DATEymd, y = n_fires)) +
+  geom_line(color = 'orange') +
+  labs(x= '', y = 'Number of fires', title = 'Daily number of fires 1992-2015')
+
+
+```
+
+#### Monthly
+
+```{r}
+fires_mo <- fires %>% 
+    group_by(DISCOVERY_DATEymd) %>%
+    summarize(n_fires = n())
+
+fires_mo <- as.xts(fires_mo$n_fires, order.by = fires_mo$DISCOVERY_DATEymd) %>%
+    apply.monthly(FUN = sum)
+
+autoplot(fires_mo, ts.colour = 'orange') +
+    labs(y = 'Number of fires', title = 'Monthly number of fires 1992-2015')
+         
+  
+```
+
+## Fires by size {#Size}
+
+```{r}
+fires %>%
+  group_by(FIRE_SIZE_CLASS) %>%
+  summarise(f_size= n())%>%
+  ggplot(aes(x = FIRE_SIZE_CLASS,y = f_size))+
+  geom_bar(stat ='identity',fill = "orange")
+```
+
+## Causes {#Causes}
+It would be interesting to examine the attributes of fires by cause. What causes the most fires? Which causes are associated with larger and longer-burning wildfires?
+
+
+```{r}
+fires %>%
+  group_by(STAT_CAUSE_DESCR) %>%
+  summarise(n_reason = n()/1000) %>%
+  ggplot(aes(x = reorder(STAT_CAUSE_DESCR,n_reason),y = n_reason ))+
+  geom_bar(stat = "identity",fill= "orange")+
+  coord_flip()+
+  labs(x = "",y= "Number of Fires in thousands", tile = "Fire by cause")
+```
+
+
+## Size of the fire by cause
+
+```{r}
+fires %>%
+  group_by(STAT_CAUSE_DESCR) %>%
+  summarise(mean_size = mean(FIRE_SIZE,na.rm = TRUE)) %>%
+  ggplot(aes(x = reorder(STAT_CAUSE_DESCR, mean_size), y = mean_size)) +
+    geom_bar(stat = 'identity', fill = 'orange') + 
+    coord_flip() + 
+    labs(x = '', y = 'Acres', title = 'Average Wildfire Size by Cause')
+```
+
+## Wildfire Geography {#Geo}
+
+```{r}
+# Add codes for DC and Puerto Rico to the default state lists
+state.abb <- append(state.abb, c("DC", "PR"))
+state.name <- append(state.name, c("District of Columbia", "Puerto Rico"))
+
+# Map the state abbreviations to state names so we can join with the map data
+fires$region <- map_chr(fires$STATE, function(x) { tolower(state.name[grep(x, state.abb)]) })
+
+# Get the us state map data
+state_map <- map_data('state')
+
+  
+```
+
+
+```{r}
+
+fires %>% 
+    select(region) %>%
+    group_by(region) %>%
+    summarize(n = n()) %>%
+    right_join(state_map, by = 'region') %>%
+    ggplot(aes(x = long, y = lat, group = group, fill = n)) + 
+    geom_polygon() + 
+    geom_path(color = 'white') + 
+    scale_fill_continuous(low = "yellow", 
+                          high = "orange",
+                          name = 'Number of fires') + 
+    theme_map() + 
+   # ggplot2::coord_map('albers', lat0=30, lat1=40) + 
+    ggtitle("US Wildfires, 1992-2015") + 
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+surprised to see Georgia with so many fires. A map of wildfires normalized by size would be more interesting. I’ll do that shortly. First let’s look at fire causes by state.
+
+I’d like to make the same map for each of the fire causes. Because it will require using the same basic code block repeatedly, I will make it a function that we can reuse.
+
+```{r}
+plotState <- function(cause){
+  fires %>% 
+        filter(STAT_CAUSE_DESCR == cause) %>%
+        select(region) %>%
+        group_by(region) %>%
+        summarize(n = n()) %>%
+        right_join(state_map, by = 'region') %>%
+        ggplot(aes(x = long, y = lat, group = group, fill = n)) + 
+        geom_polygon() + 
+        geom_path(color = 'white') + 
+        scale_fill_continuous(low = "yellow", 
+                          high = "orange",
+                          name = 'Number of fires') + 
+        theme_map() + 
+        ggtitle(paste0("US Wildfires Caused by ", cause, ", 1992-2015")) + 
+        theme(plot.title = element_text(hjust = 0.5))
+    
+}
+```
+
+### Fires by state {.tabset}
+
+#### Total
+
+```{r}
+plotState(cause = "Arson")
+```
+#### Campfire
+
+```{r}
+plotState(cause = "Campfire")
+```
+#### Debris Burning
+
+```{r}
+plotState(cause = "Debris Burning")
+
+```
+
+#### Fireworks
+
+```{r}
+plotState(cause = "Fireworks")
+```
+
+#### Lightning
+
+```{r}
+plotState(cause = "Lightning")
+```
+###
+
+Now let's normalize the data by state so that we can see the number of wildfires per square mile. These maps will be more interesting because they will allow us to more directly compare wildfire across states. Fortunately, R already has data on the area of US states in the `state.x77` matrix in the `datasets` package. 
+
+```{r}
+# Create region column in state.x77 of lowercase state names
+state.x77 <- state.x77 %>%
+    as.data.frame() %>%
+    mutate(region = tolower(rownames(state.x77)))
+
+fires %>% 
+    group_by(region) %>%
+    summarize(n_fires = n()) %>%
+    left_join(state.x77, by = 'region') %>%
+    mutate(fires_per_sqm = n_fires / Area) %>%
+    right_join(state_map, by = 'region') %>%
+    ggplot(aes(x = long, y = lat, group = group, fill = fires_per_sqm)) + 
+    geom_polygon() + 
+    geom_path(color = 'white') + 
+    scale_fill_continuous(low = "orange", 
+                          high = "darkred",
+                          name = 'Fires per \nsquare mile') + 
+    theme_map() + 
+    ggtitle("Wildfires per Square Mile by 1992-2015") + 
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+Once we adjust for size, it seems that New Jersey, New York, Georgia, South Carolina, and North Carolina have the most wildfires. 
+
+```{r}
+plotNormalizedState <- function(cause){
+  fires %>%
+    filter(STAT_CAUSE_DESCR==cause) %>%
+    group_by(region) %>%
+    summarise(no_fires = n()) %>%
+    left_join(state.x77,by = "region") %>%
+    mutate(firesPerSqm = no_fires/Area) %>%
+    right_join(state_map, by = "region") %>%
+    ggplot(aes(x = long, y = lat, group = group, fill = firesPerSqm)) + 
+    geom_polygon() + 
+    geom_path(color = 'white') + 
+    scale_fill_continuous(low = "orange", 
+                          high = "darkred",
+                          name = 'Fires per \nsquare mile') + 
+    theme_map() + 
+    ggtitle(paste0("Wildfires Caused by ", cause, " per Square Mile 1992-2015")) + 
+    theme(plot.title = element_text(hjust = 0.5))
+}
+```
+
+Now let's again look at the causes by state, this time normalized by land area.
+
+### {.tabset}
+
+#### Arson
+
+```{r}
+plotNormalizedState(cause = "Arson")
+```
+
+
+#### Campfire
+
+```{r}
+plotNormalizedState(cause = "Campfire")
+```
+
+
+#### Lightning
+```{r}
+plotNormalizedState(cause = "Lightning")
+```
+
+#### Debris Burning
+
+```{r}
+plotNormalizedState(cause = "Debris Burning")
+```
+#### Fireworks
+
+```{r}
+plotNormalizedState(cause = "Fireworks")
+```
+
+## Target Feature Analysis{#Feature} 
+
+First, let's take a look at what we are trying to predict. The column `STAT_CAUSE_DESCR` has the fire cause. We want to know what these are and how they are distributed. 
+
+
+```{r}
+fires %>%
+  group_by(STAT_CAUSE_DESCR)%>%
+  summarise(n_dist = n()) %>%
+  ggplot(aes(x=reorder(STAT_CAUSE_DESCR,n_dist),y=n_dist/1000))+
+  geom_bar(stat='identity',fill = "orange")+
+  coord_flip()+
+  labs(x="",y= "# of Fire instances in thousands")
+
+```
+
+'Debris Burning' is the most common cause by far in this sample. 'Miscellaneous', 'Lightning', and 'Arson' are fairly prevalent as well. At the other end we see some causes that are far less common. Because their frequency is so low, we may run into difficulty in predicting these classes. 
+
+## Data Setup {#dataPrep}
+
+First, let's choose what features we want to use in a model. Then we'll split our data into a train and test set. To start, let's choose only a single feature , `FIRE_SIZE` for simplicity's sake. 
+
+```{r train_test_split}
+
+# features to use
+features <- c('FIRE_SIZE')
+
+fires$STAT_CAUSE_DESCR <- as.factor(fires$STAT_CAUSE_DESCR)
+
+# index for train/test split
+set.seed(123)
+train_index <- sample(c(TRUE, FALSE), nrow(fires), replace = TRUE, prob = c(0.8, 0.2))
+test_index <- !train_index
+
+# Create x/y, train/test data
+x_train <- as.data.frame(fires[train_index, features])
+y_train <- fires$STAT_CAUSE_DESCR[train_index]
+
+x_test <- as.data.frame(fires[test_index, features])
+y_test <- fires$STAT_CAUSE_DESCR[test_index]
+
+```
+
+## Iteration 1: Benchmark {#benchmark}
+
+Before we start modelling we should set a benchmark for ourselves. If our model is not more accurate than a benchmark, then our fancy modeling is all for naught. In this case, a simple benchmark might be to just always predict the most common class - 'Debris Burning'. Let's see how accurate this method is on our test data. Note that this is equivalent to calculating the percent of the test data labeled 'Debris Burning'.
+
+```{r benchmark}
+
+preds <- rep('Debris Burning', length(y_test))
+
+test_set_acc <- round(sum(y_test == preds)/length(preds), 4)
+print(paste(c("Accuracy:" , test_set_acc)))
+
+```
+
+This naive model has an accuracy of about 22.9%. Surely we can do better than that. 
+
+## Iteration 2: A Simple Decision Tree {#simple}
+
+We'll start with a simple decision tree. Rather than use the `rpart` package directly, we'll use it through `caret`. Whenever possible, I highly recommend using `caret` for most ML tasks in R since it provides a common API for using many different model types that are scattered throughout R and its numerous packages. Let's train this decision tree using our lonely `FIRE_SIZE` feature.
+
+
+
+```{r,tree_1}
+library(caret)
+# create the training control object.
+tr_control <- trainControl(method = 'cv', number = 3)
+
+# Train the decision tree model
+set.seed(123)
+dtree <- train(x = x_train,
+               y = y_train,
+               method = 'rpart'
+              )
+
+```
+
+
+```{r Prediction_1}
+pred <- predict(dtree,newdata = x_test)
+
+#calculate the model accuracy
+
+test_set_acc <- round(sum(y_test==pred)/length(pred),4)
+print(paste(c("Accuracy :",test_set_acc)))
+
+
+```
+
+The accuracy of our simple decision tree model yields 27.1% accuracy on our test set. It appears we've already beat our benchmark but we should be careful as we don't really know by how much this score will vary on other random test sets. To get further intuition, we can examine the scores on the holdout sets used during cross-validation:
+```{r}
+
+```
+
+```{r Tree_Resample1}
+print(dtree$resample)
+
+```
+
+It looks like the accuracy score was similar during cross-validation. A good sign, but we should look deeper still. Accuracy is a fairly simple metric that will often not be able to capture the nuances of multi-class classification. Let's take a look at the confusion matrix. Because we have thirteen possible classes, this confusion matrix will be rather large, so let's dress it up a bit:
+
+
+### Results {.tabset}
+
+#### Confusion Matrix Heatmap
+
+```{r ConfusionMatrix}
+library(tibble)
+confusionMatrix(y_test,pred)$table %>%
+  prop.table(margin = 1) %>%
+  as.data.frame.matrix() %>%
+  rownames_to_column(var="actual") %>%
+  tidyr::gather(key = "prediction",value = "freq",-actual) %>%
+   ggplot(aes(x = actual, y = prediction, fill = freq)) +
+    geom_tile() +
+    geom_text(aes(label = round(freq, 2)), size = 3, color = 'gray20') + 
+    scale_fill_gradient(high = 'Red', low = 'Yellow', limits = c(0,1), name = 'Relative Frequency') +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+    ggtitle('Confusion Matrix - Simple Decision Tree')
+    
+    
+
+```
+
+#### Tree Plot
+
+Although decision trees are certainly not the most powerful model we could use, it has the great advantage of being very parsimonious. Combined with the fact that we've created out first model using only a single feature, we should easily be able to dig in and see what is going on. We can use the `rpart.plot()` function from the package of the same name to easily create a visual representation of our trained tree model. 
+
+
+
+
+```{r Tree_plot1}
+library(rpart.plot)
+rpart.plot(dtree$finalModel)
+
+```
+
+The plot shows that the model has first chosen to split on `FIRE_SIZE` >= 0.11. This was the 'best split', or the split that divided the data into the purest nodes by class. For all observations in which the `FIRE_SIZE` feature is greater than 0.11 acres, the model moves the observation to the node marked 'yes', while the remainder are moved to the terminal node on the right. All of the observation in that right terminal node are receiving a final classification of 'Lightning'. Meanwhile in the other branch the model has chosen to do a second split at `FIRE_SIZE' < 111 acres. If the size of the fire is less than 111 acres, the model classifies those observation as 'Debris Burning' while anything greater than 111 acres is classified as 'Lightning. As verified by our confusion matrix, the model is only predicting two classes. This tree doesn't go very deep.
+
+Given that we've trained this extremely simple model, its no surprise that the accuracy is so bad. Notice that 70% of the observations lie in the terminal node on the left and are classified as 'Debris Burning', yet the true classes vary considerably. There are a few things we can do to improve the model. One is to use more features and another is to allow our tree to get deeper to improve our accuracy (Not too deep though!)
+
+#### CV Plot
+
+```{r}
+plot(dtree)
+```
+
+This plot shows the cross-validation accuracy scores for different values of the complexity parameter'. Because we have not explicity built a tuning grid for this model, the complexity parameter (cp) values are chosen by `caret`. Because we set the `tuneLength` parameter in `train` to be 3, it has chosen and tested that many values. 
+
+
+###
+Notice from the confusion matrix plot, table, and the tree plot that our model is currently predicting only two of the thirteen classes. 
+
+
+## Iteration 3 : More Features {#more}
+
+Let's include more features in the training data. Here we add the `FIRE_YEAR` and the `DISCOVERY_DOY` feature, which is the day of the year that the fire was discovered. 
+
+```{r train_test_split_1}
+features <- c("FIRE_YEAR","DISCOVERY_DOY","FIRE_SIZE")
+x_train <- as.data.frame(fires[train_index,features])
+y_train <- fires$STAT_CAUSE_DESCR[train_index]
+
+x_test <- as.data.frame(fires[test_index,features])
+y_test <-fires$STAT_CAUSE_DESCR[test_index]
+
+```
+
+
+```{r tree_2}
+# Train tree model 2
+
+set.seed(123)
+
+dtree <-train(x=x_train,
+              y=y_train,
+              method = "rpart",
+              tuneLength = 5,
+              trControl = tr_control)
+
+
+```
+
+```{r Predictions_2}
+
+preds <- predict(dtree,newdata = x_test)
+
+# Accuracy of the test data
+
+Accuracy <- sum(y_test==preds)/length(preds)
+print(paste(c("Accuracy:",round(Accuracy,4))))
+
+
+```
+
+The accuracy score on the test set has improved. Again let's take a look at the cross-validation scores to see if the results are similar:
+
+```{r resample_2}
+print(dtree$resample)
+
+```
+
+Great. They are consistent with our test set score. 
+
+Let's take a look at the new confusion matrix:
+
+### Results {.tabset}
+
+#### Confusion Matrix Heatmap
+
+```{r Heatmap_2}
+
+confusionMatrix(y_test,preds)$table %>%
+  prop.table(margin = 1) %>%
+  as.data.frame.matrix() %>%
+  rownames_to_column(var = 'actual') %>%
+  tidyr::gather(key = "prediction",value ="freq",-actual) %>%
+  ggplot(aes(x=actual,y=prediction,fill= freq))+
+  geom_tile()+
+  geom_text(aes(label = round(freq, 2)), size = 3, color = 'gray20') + 
+    scale_fill_gradient(low = 'yellow', high = 'red', limits = c(0,1), name = 'Relative Frequency') +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    ggtitle('Confusion Matrix - Decision Tree')
+
+```
+```{r}
+# show confusion matrix
+confusionMatrix(y_test, preds)$table %>%
+    as.data.frame.matrix() 
+    #kable("html") %>%
+    #kable_styling(bootstrap_options = c('striped'), font_size = 8) %>%
+    #scroll_box(height = "400px")
+
+```
+
+
+Interesting. Now our model is predicting 'Miscellaneous' in addition to 'Debris Burning' and 'Lightning'. For every $27488 + 27179 + 1618 = 56285$ times that the fire's cause was 'Miscellaneous', the model got it right $10270$ times. This isn't a very interesting class though. I'd really like to see a model that can predict Arson with a reasonable level of accuracy. 
+
+#### Tree Plot
+```{r Tree_plot_2}
+rpart.plot(dtree$finalModel)
+
+```
+
+This tree is much more complicated. First, it split on `DISCOVERY_DOY` < 132. Then it performed several more splits on `DISCOVERY_DOY` and `FIRE_SIZE`. Given the maximum level of complexity we've allowed, the model chose not to split on `FIRE_YEAR`. This is somewhat intuitive, as the year of the fire likely contains little discriminatory power.
+
+#### CV plot
+```{r}
+plot(dtree)
+```
+## Iteration 4 : More Parameter
+
+Finally, let's add some features to address the 'where' aspect of this question. We could choose the `STATE` feature, but since this is a categorical features with 52 factor levels, the model may take a very long time to run. Instead let's choose the `LATITUDE` and `LONGITUDE` features since they are numeric.
+
+
+```{r, train_test_split_3}
+# Features
+
+features <- c('FIRE_YEAR', 'FIRE_SIZE', 'DISCOVERY_DOY', 'LATITUDE', 'LONGITUDE')
+
+x_train <-as.data.frame(fires[train_index,features])
+y_train <-fires$STAT_CAUSE_DESCR[train_index]
+
+x_test <- as.data.frame(fires[test_index,features])
+y_test <-fires$STAT_CAUSE_DESCR[test_index]
+
+```
+
+Because we've added more parameters, I am also going to train this model allowing for more values of the complexity paramter. We can do this by increasing the `tuneLength` parameter. This will allow the possibility for deeper trees. We could also control this explicity using a `tuneGrid`, but for the sake of simplicity I will not do this. 
+
+```{r Tree_3}
+set.seed(123)
+dtree <- train(x=x_train,
+               y=y_train,
+               method = "rpart",
+               tuneLength = 8,
+               trControl = tr_control)
+
+```
+
+
+```{r prediction_3}
+
+preds <-predict(dtree,newdata=x_test)
+
+#Accuracy
+
+accuracy <- sum(y_test==preds)/length(preds)
+print(paste(c("Accuracy:",round(accuracy,4))))
+
+```
+
+#### Results {.tabset}
+
+```{r Confussion_Matrix}
+
+confusionMatrix(y_test,preds)$table %>%
+  prop.table(margin = 1)%>%
+  as.data.frame.matrix() %>%
+  rownames_to_column(var = 'actual') %>%
+    tidyr::gather(key = 'prediction', value = 'freq',-actual) %>%
+    ggplot(aes(x = actual, y = prediction, fill = freq)) +
+    geom_tile() + 
+    geom_text(aes(label = round(freq, 2)), size = 3, color = 'gray20') + 
+    scale_fill_gradient(low = 'yellow', high = 'red', limits = c(0,1), name = 'Relative Frequency') +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+    ggtitle('Confusion Matrix - Decision Tree')
+    
+
+```
+#### Tree plot
+
+```{r Tree_plot}
+rpart.plot(dtree$finalModel)
+
+```
+
+```{r}
+plot(dtree)
+```
+
+
+** Ensamblng**
+
+At this point, we could keep going by allowing ever-increasing complexity to the decision tree model. However in doing so we risk the possibility of over-fitting. We’ll use random forest, which performs the ensembling while also randomly selecting a subset of the features on which to seek optimal splits at each node.
+
+```{r}
+library(randomForest)
+set.seed(123)
+rfmodel1 <- train(x=x_train,
+                  y= y_train,
+                  method= "rf",
+                  tuneLength = 3,
+                  ntree=100)
+                 
+```
+
+
+```{r}
+# Make predictions using test set
+preds <- predict(rfmodel1,newdata = x_test)
+
+testSetAccuracy = sum(y_test==preds)/length(preds)
+print(paste(c("Accuracy:", round(testSetAccuracy,4))))
+```
+
+
+
+
+
