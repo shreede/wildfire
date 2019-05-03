@@ -9,11 +9,6 @@ This database is a spectacular collection of data on wildfires in the United Sta
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r,include=FALSE}
-## https://www.kaggle.com/captcalculator/wildfire-exploratory-analysis/notebook
-```
-
-
 * [Load Data](#Load)
 * [Wildfires over Time](#Time)
 * [Fires by Size](#Size)
